@@ -32,7 +32,8 @@ After=network.target
 WorkingDirectory=$(pwd)
 Environment=PYTHONIOENCODING=utf-8
 Environment=GUARDIAN_DB=$(pwd)/data/guardian.db
-ExecStart=$(pwd)/.venv/bin/python cli.py serve --host 0.0.0.0 --port 8000 --no-ip-allowlist
+Environment=GUARDIAN_ALLOWED_IPS=127.0.0.1,::1,49.216.93.140,60.250.71.45,61.222.117.53,59.125.121.41,60.250.71.43
+ExecStart=$(pwd)/.venv/bin/python cli.py serve --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 User=root
