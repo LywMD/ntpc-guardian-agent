@@ -43,6 +43,40 @@
 
 ---
 
+## 發佈到 GitHub
+
+```powershell
+# 1. 登入（一次就好，會開瀏覽器授權）
+& "C:\Program Files\GitHub CLI\gh.exe" auth login
+#    選項：GitHub.com → HTTPS → Y → Login with a web browser
+
+# 2. 發佈
+.\publish.ps1              # 私有 repo（預設）
+.\publish.ps1 -Public      # 公開 repo
+.\publish.ps1 -DryRun      # 只檢查不動作
+```
+
+`publish.ps1` 在推送前會做兩道安全檢查：確認沒有 `data/`、`*.db`、`*.pdf`、
+`reports/`、認證檔被納入版控，並掃描內容有沒有 AKIA／ASIA／PRIVATE KEY 樣式。
+任何一項命中就中止，不會推上去。
+
+### 什麼不會進版控
+
+真實資料一律排除。`.gitignore` 明確擋掉：
+
+| 排除項目 | 原因 |
+|---------|------|
+| `data/raw/` | 新北市政府提供的真實 PDF（非營利園財報、公校決算書），約 140 MB |
+| `data/extracted/` | OCR 抽出的**實際機構**財務明細 |
+| `*.db` | 含真實財務數字的資料庫 |
+| `data/aws_inventory.json` | AWS 帳號 ID、ARN、bucket 名稱 |
+| `reports/` | Agent 產出的風險報告（含真實機構名稱與判定） |
+
+S3 bucket 名稱也不寫在原始碼裡，改用環境變數 `GUARDIAN_DATA_BUCKET`——
+bucket 名稱是全域唯一且可被列舉的，公開出去等於邀人來探測。
+
+---
+
 ## 啟動
 
 ### 一鍵啟動（建議）
