@@ -180,6 +180,7 @@ def build(seed: int = 20260912) -> dict[str, list[dict[str, Any]]]:
             "mixed_age_approved": 0,
             "disabled_children": rng.choices([0, 1, 2], [0.7, 0.2, 0.1])[0],
             "has_principal": 1,
+            "dataset": "demo",
             "source": "全國教保資訊網(示範資料)",
             "_profile": profile,
         }

@@ -155,10 +155,21 @@ def cmd_public(args) -> int:
 
     objs = [o for o in s3source.list_objects(args.bucket, PREFIX_PUBLIC)
             if o["key"].lower().endswith(".pdf")]
+    out = Path("data/extracted"); out.mkdir(parents=True, exist_ok=True)
+
+    if args.skip_done:
+        pending = []
+        for o in objs:
+            stem = Path(s3source._safe_name(o["key"])).stem
+            if (out / f"{stem}.json").exists():
+                print(f"  [跳過已抽取] {o['key']}")
+            else:
+                pending.append(o)
+        objs = pending
+
     if args.limit:
         objs = objs[: args.limit]
     hr(f"公校決算書（文字型 → pdfplumber）　{len(objs)} 份")
-    out = Path("data/extracted"); out.mkdir(parents=True, exist_ok=True)
     for i, o in enumerate(objs, start=1):
         print(f"\n  [{i}/{len(objs)}] {o['key']}")
         path = s3source.fetch(args.bucket, o["key"])
@@ -169,6 +180,48 @@ def cmd_public(args) -> int:
             encoding="utf-8")
         print(f"      {res['total_pages']} 頁／命中幼兒園 {len(res['relevant_pages'])} 頁"
               f"／表格列 {res['table_row_count']} 筆／機構線索 {len(res['institutions'])} 個")
+    return 0
+
+
+def cmd_units(args) -> int:
+    """抽取公校決算書第 5 冊的逐園分決算（各市立幼兒園自己的財務報表）。
+
+    第 1–4 冊是全市層級彙總，只能提供名冊與補助基準；
+    第 5 冊收錄「附屬單位決算之分決算」，才有逐園收支、人事費與員工人數。
+    """
+    from guardian.ingest import pdf_units
+
+    objs = [o for o in s3source.list_objects(args.bucket, PREFIX_PUBLIC)
+            if o["key"].lower().endswith(".pdf")]
+    # 只有第 5 冊有逐園分決算
+    objs = [o for o in objs if "第5冊" in o["key"] or "第五冊" in o["key"]]
+    out = Path("data/extracted"); out.mkdir(parents=True, exist_ok=True)
+
+    if args.skip_done:
+        pending = []
+        for o in objs:
+            stem = Path(s3source._safe_name(o["key"])).stem
+            if (out / f"{stem}.units.json").exists():
+                print(f"  [跳過已抽取] {o['key']}")
+            else:
+                pending.append(o)
+        objs = pending
+
+    if args.limit:
+        objs = objs[: args.limit]
+    hr(f"公校逐園分決算（第5冊 → pdfplumber）　{len(objs)} 份")
+    for i, o in enumerate(objs, start=1):
+        print(f"\n  [{i}/{len(objs)}] {o['key']}")
+        path = s3source.fetch(args.bucket, o["key"])
+        res = pdf_units.parse_unit_settlements(path, on_progress=lambda p, n: (
+            print(f"    掃描第 {p} / {n} 頁", flush=True) if p % 150 == 0 else None))
+        fp = out / (path.stem + ".units.json")
+        fp.write_text(json.dumps(res, ensure_ascii=False, indent=1, default=str),
+                      encoding="utf-8")
+        print(f"      {res.get('total_pages')} 頁／逐園頁面 {res.get('unit_page_count')}"
+              f"／機構 {res.get('unit_count')} 間"
+              f"／明細 {res.get('line_item_count')} 筆"
+              f"／有員工人數 {res.get('units_with_headcount')} 間")
     return 0
 
 
@@ -272,7 +325,14 @@ def main() -> int:
 
     q = sub.add_parser("public")
     q.add_argument("--limit", type=int)
+    q.add_argument("--skip-done", action="store_true",
+                   help="跳過 data/extracted 已有結果的冊次")
     q.set_defaults(fn=cmd_public)
+
+    q = sub.add_parser("units", help="抽取公校第5冊的逐園分決算")
+    q.add_argument("--limit", type=int)
+    q.add_argument("--skip-done", action="store_true")
+    q.set_defaults(fn=cmd_units)
 
     sub.add_parser("reexpand").set_defaults(fn=cmd_reexpand)
 

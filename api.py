@@ -1,11 +1,20 @@
 """小小守護員 HTTP API + 前端（對應提案的 API Gateway + Lambda 層）。
 
-啟動：python cli.py serve  → http://127.0.0.1:8000
+啟動
+  本機示範      python cli.py serve                  → http://127.0.0.1:8000
+  對外開放      python cli.py serve --host 0.0.0.0   → 自動啟用 IP 白名單
 
-安全性提醒：本服務預設「沒有任何身分驗證」，只綁 127.0.0.1 供本機示範使用。
-內含機構財務與民眾投訴內容，屬敏感資料。若要對外開放，必須先加上：
+安全性提醒：本服務「沒有任何身分驗證」。內含機構財務與民眾投訴內容，屬敏感資料。
+
+對外開放時目前的防線是「來源 IP 白名單」，分兩層：
+  網路層  AWS Security Group（見 infra/network_access.py）
+  應用層  guardian.netguard.IPAllowlistMiddleware
+
+必須清楚的是：IP 白名單不等於身分驗證。它能限制「從哪裡連」，
+但無法辨識「這是誰」，因此同一出口 IP 後面的所有人都被視為同一合法使用者，
+也無法做操作稽核與權限分級。正式上線前仍需補上：
   - 身分驗證與授權（Cognito / API Gateway Authorizer / IAM）
-  - HTTPS、CORS 白名單、稽核日誌
+  - HTTPS（ACM 憑證 + ALB 或 CloudFront）
   - 依稽查人員角色限制可見機構範圍
 """
 from __future__ import annotations
@@ -18,14 +27,51 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from guardian import agent as agent_mod
-from guardian import config, store
+from guardian import config, netguard, store
 from guardian.tools import compliance, etl, forensic, scoring, sentiment
 
 app = FastAPI(title="小小守護員 風險稽查智能代理人", version="1.0.0")
 
+# 來源 IP 白名單。只在對外開放時啟用（cli.py serve 綁非 loopback 位址時會自動開）。
+# 放在 ASGI 最外層，連靜態頁與未定義路由都會被擋，不會有漏網端點。
+if config.ENFORCE_IP_ALLOWLIST:
+    app.add_middleware(
+        netguard.IPAllowlistMiddleware,
+        allowed=config.ALLOWED_IPS,
+        trust_proxy=config.TRUST_PROXY_HEADER,
+        trusted_proxies=config.TRUSTED_PROXIES,
+        # /healthz 不設限，讓 ALB／Target Group 的健康檢查能通
+        # （健康檢查來自 VPC 內部位址，不會在白名單裡）
+        exempt_paths=("/healthz",),
+    )
+
 _sessions: dict[str, agent_mod.GuardianAgent] = {}
 _lock = threading.Lock()
 WEB_DIR = config.ROOT / "web"
+
+
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    """負載平衡器健康檢查用。刻意不回傳任何機構資料。"""
+    return {"status": "ok"}
+
+
+@app.get("/api/access-policy")
+def access_policy() -> dict[str, Any]:
+    """回報目前的連線管制設定，供部署後自我確認。
+
+    不回傳機構資料，只說明白名單狀態，方便確認「對外開放後是否真的鎖上了」。
+    """
+    return {
+        "ip_allowlist_enforced": config.ENFORCE_IP_ALLOWLIST,
+        "allowed_sources": config.ALLOWED_IPS if config.ENFORCE_IP_ALLOWLIST else [],
+        "trust_proxy_header": config.TRUST_PROXY_HEADER,
+        "trusted_proxies": config.TRUSTED_PROXIES,
+        "authentication": "none",
+        "warning": ("本服務沒有身分驗證。IP 白名單只能限制連線來源，"
+                    "無法辨識使用者身分，亦無操作稽核與權限分級；"
+                    "同一出口 IP 後的所有人都會被視為同一合法使用者。"),
+    }
 
 
 # ------------------------------------------------------------------ 基本
@@ -50,7 +96,7 @@ def health() -> dict[str, Any]:
 
 # ------------------------------------------------------------------ 排行榜 / 地圖
 @app.get("/api/leaderboard")
-def leaderboard(city: str | None = "新北市", top_n: int = 40) -> dict[str, Any]:
+def leaderboard(city: str | None = "新北市", top_n: int = 300) -> dict[str, Any]:
     return scoring.leaderboard(city, top_n)
 
 

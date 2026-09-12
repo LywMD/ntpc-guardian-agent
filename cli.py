@@ -442,11 +442,61 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_loopback(host: str) -> bool:
+    import ipaddress
+
+    h = (host or "").strip()
+    if h in ("localhost", ""):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
+    import os
+
     import uvicorn
 
-    print(f"API + 前端啟動於 http://127.0.0.1:{args.port}")
-    uvicorn.run("api:app", host=args.host, port=args.port, reload=False)
+    from guardian import config
+
+    exposed = not _is_loopback(args.host)
+
+    # 綁到非 loopback 位址就是對外開放，這時一定要啟用來源 IP 白名單。
+    # 用「預設安全」的方式處理：不是靠使用者記得加參數，而是綁定位址一旦
+    # 對外就自動開啟；要關掉必須顯式指定 --no-ip-allowlist。
+    if exposed and not args.no_ip_allowlist:
+        os.environ["GUARDIAN_ENFORCE_IP_ALLOWLIST"] = "1"
+        config.ENFORCE_IP_ALLOWLIST = True
+    if args.trust_proxy:
+        os.environ["GUARDIAN_TRUST_PROXY_HEADER"] = "1"
+        config.TRUST_PROXY_HEADER = True
+
+    shown_host = "127.0.0.1" if _is_loopback(args.host) else args.host
+    print(f"API + 前端啟動於 http://{shown_host}:{args.port}")
+
+    if exposed:
+        print("-" * 72)
+        if config.ENFORCE_IP_ALLOWLIST:
+            print("  對外開放模式：已啟用來源 IP 白名單")
+            for ip in config.ALLOWED_IPS:
+                print(f"      允許 {ip}")
+            print(f"  信任 X-Forwarded-For：{'是' if config.TRUST_PROXY_HEADER else '否'}")
+            if not config.TRUST_PROXY_HEADER:
+                print("      （若前面有 ALB／CloudFront，需加 --trust-proxy，"
+                      "否則看到的來源會是代理位址而非用戶端）")
+        else:
+            print("  !! 對外開放但白名單已被停用（--no-ip-allowlist）")
+            print("     本服務沒有身分驗證，等於完全公開，請確認這是你要的。")
+        print("  提醒：IP 白名單不是身分驗證，無法辨識使用者、無法做權限分級。")
+        print("        AWS 端請一併設定 Security Group（見 infra/network_access.py）。")
+        print("-" * 72)
+
+    uvicorn.run("api:app", host=args.host, port=args.port, reload=False,
+                # 對外開放時把 uvicorn 的 proxy header 解析交給我們自己的中介層，
+                # 避免兩邊各自解讀 XFF 造成判斷不一致
+                forwarded_allow_ips="*" if args.trust_proxy else None)
     return 0
 
 
@@ -530,7 +580,12 @@ def main() -> int:
     q.set_defaults(fn=cmd_train)
 
     q = sub.add_parser("serve", help="啟動 API + 前端")
-    q.add_argument("--host", default="127.0.0.1")
+    q.add_argument("--host", default="127.0.0.1",
+                   help="綁定位址。0.0.0.0 = 對外開放（會自動啟用 IP 白名單）")
+    q.add_argument("--trust-proxy", action="store_true",
+                   help="服務在 ALB／CloudFront 後面時加此參數，才會讀 X-Forwarded-For")
+    q.add_argument("--no-ip-allowlist", action="store_true",
+                   help="對外開放但不啟用白名單（等於完全公開，不建議）")
     q.add_argument("--port", type=int, default=8000)
     q.set_defaults(fn=cmd_serve)
 

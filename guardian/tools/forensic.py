@@ -156,10 +156,22 @@ def metrics(inst_id: str, year: int = CURRENT_YEAR) -> dict[str, Any]:
 
 
 @lru_cache(maxsize=64)
-def _peer_stats(inst_type: str, city: str, year: int) -> dict[str, tuple[float, float, int]]:
-    """同類型、同縣市的同業平均與標準差。"""
-    peers = store.q(
-        "SELECT inst_id FROM institutions WHERE inst_type=? AND city=?", (inst_type, city))
+def _peer_stats(inst_type: str, city: str, year: int,
+                dataset: str | None = None) -> dict[str, tuple[float, float, int]]:
+    """同類型、同縣市的同業平均與標準差。
+
+    dataset 用來把「真實文件資料」與「示範資料集」的母體分開。真實財報沒有
+    年齡層與人員配置欄位、示範資料有，混在一起算平均與標準差會讓異常判定失真，
+    所以同業比較一律只跟同一個 dataset 的機構比。
+    """
+    if dataset:
+        peers = store.q(
+            "SELECT inst_id FROM institutions WHERE inst_type=? AND city=?"
+            " AND COALESCE(dataset,'real')=?", (inst_type, city, dataset))
+    else:
+        peers = store.q(
+            "SELECT inst_id FROM institutions WHERE inst_type=? AND city=?",
+            (inst_type, city))
     collected: dict[str, list[float]] = {}
     for p in peers:
         m = metrics(p["inst_id"], year)
@@ -185,7 +197,9 @@ def ratio_analysis(inst_id: str, year: int = CURRENT_YEAR) -> dict[str, Any]:
         return {"error": f"找不到機構 {inst_id}"}
     m = metrics(inst_id, year)
     prev = metrics(inst_id, PREV_YEAR)
-    peers = _peer_stats(inst["inst_type"], inst["city"], year)
+    # 只跟同一資料集的機構比較（真實文件 vs 示範資料集不可混算母體）
+    peers = _peer_stats(inst["inst_type"], inst["city"], year,
+                        inst.get("dataset") or "real")
 
     findings: list[dict[str, Any]] = []
     penalty = 0.0
@@ -367,15 +381,48 @@ BASELINE_INDICATORS = [
 ]
 
 
+def _pick_dataset(city: str) -> str | None:
+    """自動判斷該城市要以哪個 dataset 當母體。
+
+    優先選 real（有真實資料就以它為準，跟 baseline_comparison 對單一機構
+    的判斷邏輯一致）；沒有 real 資料時退回實際存在的那個 dataset（例如
+    剛跑完 start.ps1、只有示範資料集的情境），而不是靜默回傳 0 筆——
+    那會讓 cli.py baseline / stability 在第一次啟動時看起來像壞掉。
+    """
+    rows = store.q(
+        "SELECT COALESCE(dataset,'real') AS ds, COUNT(*) AS n FROM institutions"
+        " WHERE city=? GROUP BY ds", (city,))
+    counts = {r["ds"]: r["n"] for r in rows}
+    if not counts:
+        return "real"
+    if "real" in counts:
+        return "real"
+    return max(counts, key=lambda k: counts[k])
+
+
 @lru_cache(maxsize=32)
-def citywide_baseline(city: str, year: int = CURRENT_YEAR) -> dict[str, Any]:
+def citywide_baseline(city: str, year: int = CURRENT_YEAR,
+                      dataset: str | None = "auto") -> dict[str, Any]:
     """全體統計基準。
 
     教育局／城鄉發展局訪談結論：指標合理性應「參考全體統計數據並設定標準差
     作為判斷異常的依據」。因此這裡以全市所有機構為母體算出每項指標的
     平均值、標準差與分位數，並換算成 1σ／2σ／3σ 三段門檻。
+
+    dataset：母體限定在同一資料集。真實文件與示範資料集的欄位完整度不同，
+    混算會讓標準差被稀釋，異常門檻跟著失準。預設 "auto"：有 real 資料就用
+    real，否則自動退回實際存在的 dataset。傳 None 表示不分資料集
+    （僅供整體概覽，不建議用於異常判定）；也可明確指定 "real"／"demo"。
     """
-    rows = store.q("SELECT inst_id, inst_type, district FROM institutions WHERE city=?", (city,))
+    if dataset == "auto":
+        dataset = _pick_dataset(city)
+    if dataset:
+        rows = store.q(
+            "SELECT inst_id, inst_type, district FROM institutions"
+            " WHERE city=? AND COALESCE(dataset,'real')=?", (city, dataset))
+    else:
+        rows = store.q(
+            "SELECT inst_id, inst_type, district FROM institutions WHERE city=?", (city,))
     collected: dict[str, list[float]] = {}
     for r in rows:
         m = metrics(r["inst_id"], year)
@@ -446,7 +493,7 @@ def baseline_comparison(inst_id: str, year: int = CURRENT_YEAR) -> dict[str, Any
     inst = store.get_institution(inst_id)
     if not inst:
         return {}
-    base = citywide_baseline(inst["city"], year)
+    base = citywide_baseline(inst["city"], year, inst.get("dataset") or "real")
     m = metrics(inst_id, year)
     rows = []
     for key, stat in base.get("indicators", {}).items():
@@ -469,15 +516,27 @@ def baseline_comparison(inst_id: str, year: int = CURRENT_YEAR) -> dict[str, Any
     }
 
 
-def district_stability(city: str = "新北市", year: int = CURRENT_YEAR) -> dict[str, Any]:
+def district_stability(city: str = "新北市", year: int = CURRENT_YEAR,
+                       dataset: str | None = "auto") -> dict[str, Any]:
     """區域穩定度分析。
 
     訪談結論：不同區域可能存在數據波動，但理想上應維持在穩定範圍內。
     因此除了比較各區平均值與全市平均，另以變異係數（CV）衡量各區內部的離散程度，
     超過門檻即代表該區的資料本身不穩定，用它當比較基準要格外小心。
+
+    dataset 預設 "auto"，語意與 citywide_baseline 相同——這裡先解析一次，
+    確保這個函式自己查機構清單時用的 dataset 篩選條件跟算出來的
+    citywide baseline 是同一個母體。
     """
-    base = citywide_baseline(city, year)
-    rows = store.q("SELECT inst_id, district FROM institutions WHERE city=?", (city,))
+    if dataset == "auto":
+        dataset = _pick_dataset(city)
+    base = citywide_baseline(city, year, dataset)
+    if dataset:
+        rows = store.q(
+            "SELECT inst_id, district FROM institutions"
+            " WHERE city=? AND COALESCE(dataset,'real')=?", (city, dataset))
+    else:
+        rows = store.q("SELECT inst_id, district FROM institutions WHERE city=?", (city,))
     by_district: dict[str, dict[str, list[float]]] = {}
     for r in rows:
         m = metrics(r["inst_id"], year)

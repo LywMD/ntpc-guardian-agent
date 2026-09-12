@@ -54,9 +54,16 @@ HEADERS = {"User-Agent": "GuardianAgent/1.0 (public-data ETL; contact: education
 
 # ------------------------------------------------------------------ live 抓取
 def _try_live(timeout: float = 8.0) -> tuple[list[dict[str, Any]], list[str]]:
-    """嘗試抓真實開放資料。回傳 (records, 錯誤訊息清單)。"""
+    """嘗試抓真實開放資料。回傳 (records, 錯誤訊息清單)。
+
+    預設不執行：config.ALLOW_EXTERNAL_FETCH 為 False 時直接返回，
+    資料來源限定 AWS S3（見 config 的資料來源政策說明）。
+    """
     notes: list[str] = []
     records: list[dict[str, Any]] = []
+    if not config.ALLOW_EXTERNAL_FETCH:
+        return [], ["已停用對外抓取（資料來源限定 AWS S3）；"
+                    "如需開啟請設 GUARDIAN_ALLOW_EXTERNAL_FETCH=1"]
     try:
         import requests
     except ImportError:
@@ -169,7 +176,8 @@ def _resolve(name: str, address: str, city: str) -> str:
     return store.make_inst_id(name, address, city)
 
 
-def _load_real_data(city: str, notes: list[str]) -> dict[str, Any] | None:
+def _load_real_data(city: str, notes: list[str],
+                    purge_demo: bool = True) -> dict[str, Any] | None:
     """若已有從 S3 抽取出來的真實資料，就載入資料庫。
 
     抽取流程（OCR / 文字解析）成本較高，因此獨立成 scripts/ingest_real_data.py，
@@ -185,7 +193,7 @@ def _load_real_data(city: str, notes: list[str]) -> dict[str, Any] | None:
     try:
         from ..ingest import loader
 
-        res = loader.load_all(city=city)
+        res = loader.load_all(city=city, purge_seed_data=purge_demo)
         notes.append(
             f"載入真實資料：非營利園財報 {res.get('nonprofit_reports_loaded')} 份、"
             f"公校決算書 {res.get('public_settlements_loaded')} 份、"
@@ -197,9 +205,53 @@ def _load_real_data(city: str, notes: list[str]) -> dict[str, Any] | None:
         return None
 
 
+def _missing_layers() -> list[dict[str, str]]:
+    """回報哪幾個訊號層目前沒有資料，避免「無資料」被誤讀成「無風險」。
+
+    這是刻意做成顯性回報：裁罰／收費／輿情三層若空著，
+    歷史紀錄子分數、收費交叉比對、輿情子分數都會是 0，
+    報告若不標註就會看起來像「這些機構都很乾淨」。
+    """
+    st = store.stats()
+    gaps = []
+    if not st.get("social_posts"):
+        gaps.append({
+            "layer": "社群輿情",
+            "impact": "輿情異常子分數全部為 0，財務＋輿情雙訊號模型退化為單訊號",
+            "reason": "真實文件不含社群討論；官方無此類開放資料，需即時爬取或載入示範資料集",
+        })
+    if not st.get("penalties"):
+        gaps.append({
+            "layer": "裁罰紀錄",
+            "impact": "歷史紀錄子分數只剩評鑑等第項",
+            "reason": "全國教保資訊網裁罰公告尚無可用抓取來源（政府憑證鏈問題）",
+        })
+    if not st.get("fee_rows"):
+        gaps.append({
+            "layer": "逐園收費公告",
+            "impact": "鑑識會計三訊號中的「收費與決算交叉比對」無法執行",
+            "reason": "決算書僅有全市層級補助基準，無逐園公告收費",
+        })
+    return gaps
+
+
 def refresh(city: str = "新北市", allow_live: bool = True, seed_fallback: bool = True,
-            use_real: bool = True) -> dict[str, Any]:
-    """執行一次完整 ETL，回傳可讀的整合摘要。"""
+            use_real: bool = True, include_demo: bool = False) -> dict[str, Any]:
+    """執行一次完整 ETL，回傳可讀的整合摘要。
+
+    include_demo：真實資料存在時，是否「另外」載入示範資料集。
+
+    為什麼需要這個開關：S3 上的真實文件（非營利園財報、公校決算書）只含
+    機構名冊與財務明細，**不含裁罰紀錄、逐園收費公告與社群貼文**——官方那三類
+    開放資料需要 API 金鑰或受政府憑證問題阻擋（見 OFFICIAL_SOURCES 註解）。
+    若只載入真實資料，輿情子分數與歷史紀錄子分數會全部是 0，
+    「財務＋輿情雙訊號」等於只剩單訊號，收費交叉比對也無法執行。
+
+    因此預設允許兩者並存：真實資料提供可引用的財務證據，示範資料集維持
+    四大子分數與五項工具的完整可驗證性。兩者以 institutions.dataset
+    欄位區分（real／demo），同業母體與全市標準差一律只在同一資料集內計算，
+    統計上不會互相污染。
+    """
     notes: list[str] = []
     live_records: list[dict[str, Any]] = []
     if allow_live:
@@ -208,14 +260,14 @@ def refresh(city: str = "新北市", allow_live: bool = True, seed_fallback: boo
 
     # 先看有沒有已抽取好的真實資料（S3 上的非營利園財報／公校決算書）
     # use_real=False 用於測試：強制走示範資料集，避免測試結果被真實資料影響
-    real = _load_real_data(city, notes) if use_real else None
+    real = _load_real_data(city, notes, purge_demo=not include_demo) if use_real else None
 
     source_mode = "live"
     dataset: dict[str, list[dict[str, Any]]]
     if live_records:
         dataset = {"institutions": live_records, "fees": [], "financials": [],
                    "penalties": [], "posts": []}
-    elif real:
+    elif real and not include_demo:
         # 真實資料已由 loader 直接寫入資料庫，這裡不再走 dataset 流程
         store.set_meta("etl_source_mode", "real")
         store.set_meta("etl_last_run", store.now_iso())
@@ -234,7 +286,15 @@ def refresh(city: str = "新北市", allow_live: bool = True, seed_fallback: boo
             "sources_tried": [s["name"] for s in OFFICIAL_SOURCES],
             "notes": notes,
             "db": store.stats(),
+            "missing_layers": _missing_layers(),
         }
+    elif real and include_demo:
+        # 真實資料已寫入；再疊上示範資料集，補足官方開放資料拿不到的
+        # 裁罰／逐園收費／社群輿情三層，讓四大子分數與五項工具都能驗證。
+        source_mode = "real+demo"
+        notes.append("真實資料已載入；另疊加示範資料集以補足裁罰／收費／輿情三層"
+                     "（以 dataset 欄位區分，統計母體不混算）")
+        dataset = seed.build()
     elif seed_fallback:
         source_mode = "seed"
         notes.append("live 來源皆不可用，改用內建示範資料集（結構與官方欄位一致）")
@@ -336,6 +396,7 @@ def refresh(city: str = "新北市", allow_live: bool = True, seed_fallback: boo
         "sources_tried": [s["name"] for s in OFFICIAL_SOURCES],
         "notes": notes,
         "db": store.stats(),
+        "missing_layers": _missing_layers(),
     }
 
 

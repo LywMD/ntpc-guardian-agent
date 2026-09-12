@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import config, store
+from .pdf_text import is_valid_institution_name
 
 log = logging.getLogger("guardian.ingest.loader")
 
@@ -229,6 +230,7 @@ def load_nonprofit_report(doc: dict[str, Any], city: str = "新北市") -> dict[
         "city": city,
         "district": _guess_district(name, address),
         "address": address,
+        "dataset": "real",
         "source": f"非營利園財報:{doc.get('file')}",
     })
 
@@ -333,7 +335,7 @@ def load_nonprofit_report(doc: dict[str, Any], city: str = "新北市") -> dict[
         upd["staff_count"] = int(headcount["staff"])
     if upd:
         upd.update({"name": name, "inst_id": inst_id, "city": city,
-                    "inst_type": "幼兒園"})
+                    "inst_type": "幼兒園", "dataset": "real"})
         store.upsert_institution(upd)
 
     used = [e.get("page") for e in doc.get("extracted", [])
@@ -365,9 +367,17 @@ def load_public_settlement(doc: dict[str, Any], city: str = "新北市") -> dict
     n_fee = store.insert_many("fee_standards", fee_rows)
 
     # 機構名冊線索：只建立主檔，不寫財務（決算書是全市層級）
+    #
+    # 這裡再過濾一次名稱，而不是只信任抽取階段的結果：舊版 data/extracted
+    # 產生於名稱過濾規則加入之前，含有「及設備辦理非營利幼兒園」這類跨行
+    # 誤抓片段。在載入端擋掉，就不必為了清資料重掃 752 頁。
     created = 0
+    rejected_names: list[str] = []
     for name, pages in (doc.get("institutions") or {}).items():
         if "幼兒園" not in name:
+            continue
+        if not is_valid_institution_name(name):
+            rejected_names.append(name)
             continue
         full = name if name.startswith(city) else city + name
         store.upsert_institution({
@@ -376,6 +386,7 @@ def load_public_settlement(doc: dict[str, Any], city: str = "新北市") -> dict
             "city": city,
             "district": _guess_district(full, None),
             "is_public_affiliated": 1 if "附設" in full else 0,
+            "dataset": "real",
             "source": f"公校決算書:{doc.get('file')} p{pages[:3]}",
         })
         created += 1
@@ -383,6 +394,7 @@ def load_public_settlement(doc: dict[str, Any], city: str = "新北市") -> dict
     return {"file": doc.get("file"), "year": year,
             "fee_standard_rows": n_fee,
             "institutions_from_roster": created,
+            "rejected_names": rejected_names,
             "relevant_pages": len(doc.get("relevant_pages", [])),
             "table_rows_available": doc.get("table_row_count", 0)}
 
@@ -413,25 +425,199 @@ def purge_seed() -> dict[str, int]:
     return counts
 
 
+def load_unit_settlements(doc: dict[str, Any], city: str = "新北市") -> dict[str, Any]:
+    """載入公校決算書第 5 冊的逐園分決算。
+
+    這是公校幼兒園唯一有逐園財務數字的來源。與非營利園財報的處理原則一致：
+    同一年度會有多張涵蓋同一筆錢的報表，只有 primary 納入合計，
+    其餘僅供 Benford 與明細查閱，否則收支合計會重複累加。
+
+    若某園沒有「收入支出表」（primary），就把「基金來源、用途及餘絀表」
+    （primary_alt）升為 primary，避免該園完全沒有可算合計的來源。
+    """
+    year = doc.get("year_ad")
+    if not year:
+        return {"file": doc.get("file"), "skipped": "無法判定年度"}
+
+    # 每一冊用自己的來源標記，載入時才能只清掉本冊寫過的資料
+    src_tag = f"公校逐園分決算[{doc.get('file')}]"
+
+    loaded: list[dict[str, Any]] = []
+    total_rows = 0
+    for name, unit in (doc.get("units") or {}).items():
+        full = name if name.startswith(city) else city + name
+        inst_id = store.upsert_institution({
+            "name": full,
+            "inst_type": "幼兒園",
+            "city": city,
+            "district": _guess_district(full, None),
+            "is_public_affiliated": 1 if "附設" in full else 0,
+            "dataset": "real",
+            "source": f"公校逐園分決算:{doc.get('file')}",
+        })
+
+        items = unit.get("line_items") or []
+        roles_present = {it.get("role") for it in items}
+        promote_alt = "primary" not in roles_present and "primary_alt" in roles_present
+
+        rows: list[dict[str, Any]] = []
+        for it in items:
+            amt = _clean_amount(it.get("amount"))
+            if amt is None or abs(amt) < 1:
+                continue
+            role = it.get("role") or "detail"
+            if role == "primary_alt":
+                role = "primary" if promote_alt else "comparison"
+            if it.get("is_subtotal"):
+                role = "subtotal"
+            subject = (it.get("subject") or "").strip()
+            if not subject:
+                continue
+            rows.append({
+                "inst_id": inst_id, "year": year, "flow": it.get("flow") or "income",
+                "subject": subject, "amount": amt, "role": role,
+                "source": f"{src_tag} p{it.get('page')} {it.get('statement')}",
+            })
+            # 上年度比較數只從 primary 取；明細表的上期欄容易對不上科目。
+            # 這些列 role='prior'，不屬於 TOTAL_ROLES，因此不會與另一冊
+            # 同年度的 primary 資料重複計入合計。
+            prior = _clean_amount(it.get("prior_amount"))
+            if role == "primary" and prior is not None and abs(prior) >= 1:
+                rows.append({
+                    "inst_id": inst_id, "year": year - 1,
+                    "flow": it.get("flow") or "income",
+                    "subject": subject, "amount": prior,
+                    "role": "subtotal" if it.get("is_subtotal") else "prior",
+                    "source": (f"{src_tag} p{it.get('page')} "
+                               f"{it.get('statement')}（上年度比較數）"),
+                })
+
+        # 先清掉「本冊」寫過的舊資料，避免重跑累加。
+        #
+        # 這裡必須用本冊的 source 標記，不能用「公校逐園分決算%」一次刪掉：
+        # 113 年冊會寫入 2024（主表）與 2023（上年度比較數），
+        # 若以年度加通用前綴刪除，就會把 112 年冊寫的 2023 主表資料一起刪掉，
+        # 導致每跑一次載入就少一年的權威資料。
+        store.conn().execute(
+            "DELETE FROM financials WHERE inst_id=? AND source LIKE ?",
+            (inst_id, f"{src_tag}%"))
+        store.conn().commit()
+        n = store.insert_many("financials", rows, ignore=False) if rows else 0
+        total_rows += n
+
+        # 員工人數 → institutions.staff_count
+        # 公校幼兒園原本沒有任何人員數欄位，法規遵循的師生比項目全部
+        # 落在 unverifiable；決算書的員工人數彙計表補上了這一塊。
+        hc = unit.get("headcount") or {}
+        staff_total = hc.get("total")
+        upd: dict[str, Any] = {}
+        if isinstance(staff_total, (int, float)) and 0 < staff_total < 500:
+            upd["staff_count"] = int(staff_total)
+        cook = hc.get("廚工")
+        if isinstance(cook, (int, float)) and 0 <= cook < 100:
+            upd["cook_count"] = int(cook)
+        if upd:
+            upd.update({"name": full, "inst_id": inst_id, "city": city,
+                        "inst_type": "幼兒園", "dataset": "real"})
+            store.upsert_institution(upd)
+
+        loaded.append({
+            "institution": full, "inst_id": inst_id, "year": year,
+            "financial_rows": n, "pages": len(unit.get("pages") or []),
+            "staff_count": upd.get("staff_count"),
+            "primary_source": ("收入支出表" if not promote_alt
+                               else "基金來源、用途及餘絀表（無收入支出表，升為主表）"),
+        })
+
+    return {"file": doc.get("file"), "year": year,
+            "units_loaded": len(loaded), "financial_rows": total_rows,
+            "units": loaded}
+
+
+def purge_invalid_roster_names() -> list[str]:
+    """移除舊版名冊抽取留下的誤抓機構。
+
+    只針對「來源是公校決算書名冊」且「名稱通不過過濾器」的紀錄，
+    避免誤刪任何有實際財報來源的機構。
+    """
+    rows = store.q(
+        "SELECT inst_id, name FROM institutions WHERE sources LIKE ?",
+        ("%公校決算書%",))
+    bad = [r for r in rows
+           if not is_valid_institution_name(
+               r["name"].replace("新北市", "", 1) if r["name"].startswith("新北市")
+               else r["name"])
+           and not is_valid_institution_name(r["name"])]
+    if not bad:
+        return []
+    c = store.conn()
+    ids = [r["inst_id"] for r in bad]
+    marks = ",".join("?" * len(ids))
+    for table in ("financials", "fees", "penalties", "social_posts", "scores", "alerts"):
+        c.execute(f"DELETE FROM {table} WHERE inst_id IN ({marks})", ids)
+    c.execute(f"DELETE FROM institutions WHERE inst_id IN ({marks})", ids)
+    c.commit()
+    return [r["name"] for r in bad]
+
+
+def merge_municipal_name_variants(city: str = "新北市") -> list[dict[str, str]]:
+    """合併市立幼兒園的漏字重複。
+
+    決算書內文有時寫「新北市萬里幼兒園」、有時寫全名「新北市立萬里幼兒園」，
+    正則兩種都會命中，於是同一間園被建成兩筆。正式名稱含「立」，
+    因此把缺字版併入含「立」版。
+
+    只在「含立版確實存在」且「缺字版沒有任何財務資料」時才刪，
+    避免把真的獨立機構誤併。
+    """
+    rows = store.q("SELECT inst_id, name FROM institutions WHERE city = ?", (city,))
+    by_name = {r["name"]: r["inst_id"] for r in rows}
+    merged: list[dict[str, str]] = []
+    c = store.conn()
+    prefix = city  # 例：新北市
+    for name, inst_id in list(by_name.items()):
+        if not name.startswith(prefix) or name.startswith(prefix + "立"):
+            continue
+        canonical = prefix + "立" + name[len(prefix):]
+        target = by_name.get(canonical)
+        if not target or target == inst_id:
+            continue
+        n_fin = store.q1(
+            "SELECT COUNT(*) AS n FROM financials WHERE inst_id = ?", (inst_id,))
+        if (n_fin or {}).get("n"):
+            continue  # 有財務資料，不動它
+        for table in ("financials", "fees", "penalties", "social_posts",
+                      "scores", "alerts"):
+            c.execute(f"DELETE FROM {table} WHERE inst_id = ?", (inst_id,))
+        c.execute("DELETE FROM institutions WHERE inst_id = ?", (inst_id,))
+        merged.append({"removed": name, "kept": canonical})
+    if merged:
+        c.commit()
+    return merged
+
+
 def load_all(city: str = "新北市", purge_seed_data: bool = True) -> dict[str, Any]:
     if not EXTRACTED_DIR.exists():
         return {"error": f"找不到 {EXTRACTED_DIR}，請先跑 ingest_real_data.py"}
 
     nonprofit: list[dict[str, Any]] = []
     public: list[dict[str, Any]] = []
+    units: list[dict[str, Any]] = []
     for fp in sorted(EXTRACTED_DIR.glob("*.json")):
         try:
             doc = json.loads(fp.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
             log.warning("讀不到 %s：%s", fp.name, exc)
             continue
-        if "extracted" in doc:          # OCR 產物（非營利園財報）
+        if doc.get("kind") == "public_unit_settlement":   # 公校逐園分決算（第5冊）
+            units.append(load_unit_settlements(doc, city))
+        elif "extracted" in doc:        # OCR 產物（非營利園財報）
             nonprofit.append(load_nonprofit_report(doc, city))
-        elif "relevant_pages" in doc:   # 文字解析產物（公校決算書）
+        elif "relevant_pages" in doc:   # 文字解析產物（公校決算書全市層級）
             public.append(load_public_settlement(doc, city))
 
     purged: dict[str, int] = {}
-    if (nonprofit or public) and purge_seed_data:
+    if (nonprofit or public or units) and purge_seed_data:
         purged = purge_seed()
         # 示範資料清掉後，同業母體與全市統計都得重算
         try:
@@ -441,13 +627,19 @@ def load_all(city: str = "新北市", purge_seed_data: bool = True) -> dict[str,
         except Exception:  # noqa: BLE001
             pass
 
-    if nonprofit or public:
+    # 清掉舊版名冊規則留下的誤抓機構（例：「及設備辦理非營利幼兒園」）
+    purged_bad_names = purge_invalid_roster_names() if public else []
+    # 合併市立幼兒園漏字重複（例：「新北市萬里幼兒園」併入「新北市立萬里幼兒園」）
+    merged_variants = merge_municipal_name_variants(city) if public else []
+
+    if nonprofit or public or units:
         store.set_meta("etl_source_mode", "real")
         store.set_meta("etl_last_run", store.now_iso())
         store.set_meta("real_data_sources", json.dumps({
             "nonprofit_reports": [n.get("institution") for n in nonprofit
                                   if n.get("institution")],
             "public_settlements": [p.get("file") for p in public],
+            "public_unit_settlements": [u.get("file") for u in units],
         }, ensure_ascii=False))
 
     st = store.stats()
@@ -457,10 +649,15 @@ def load_all(city: str = "新北市", purge_seed_data: bool = True) -> dict[str,
         "nonprofit_institutions": [n.get("institution") for n in nonprofit],
         "nonprofit_financial_rows": sum(n.get("financial_rows", 0) for n in nonprofit),
         "public_settlements_loaded": len(public),
+        "public_unit_files_loaded": len(units),
+        "public_unit_institutions": sum(u.get("units_loaded", 0) for u in units),
+        "public_unit_financial_rows": sum(u.get("financial_rows", 0) for u in units),
         "fee_standard_rows": sum(p.get("fee_standard_rows", 0) for p in public),
         "roster_institutions": sum(p.get("institutions_from_roster", 0) for p in public),
+        "roster_names_rejected": purged_bad_names,
+        "roster_name_variants_merged": merged_variants,
         "db_institutions": st["institutions"],
         "db_financial_rows": st["financial_rows"],
         "data_source_mode": st["data_source_mode"],
-        "detail": {"nonprofit": nonprofit, "public": public},
+        "detail": {"nonprofit": nonprofit, "public": public, "units": units},
     }

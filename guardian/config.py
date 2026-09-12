@@ -37,6 +37,65 @@ S3_PREFIX = os.getenv("GUARDIAN_S3_PREFIX", "guardian/")
 
 MAX_AGENT_TURNS = int(os.getenv("GUARDIAN_MAX_TURNS", "16"))
 
+# ---------------------------------------------------------------- 資料來源政策
+# 只使用 AWS 上的資料，不對外抓取任何網站。
+#
+# 為什麼預設關閉對外抓取：
+#   1. 政府開放資料站台實測不可用——data.ntpc.gov.tw 與 ap.ece.moe.edu.tw 的
+#      憑證鏈有缺陷（缺 Subject Key Identifier／未送中介憑證），
+#      data.gov.tw 需要申請 API Key。抓不到卻留著呼叫只會產生誤導性的錯誤訊息。
+#   2. PTT 等社群平台的搜尋頁結構隨時會變，抓回來的標題也無法保證真的在講該機構，
+#      誤植到特定幼兒園身上是會傷害到具體對象的錯誤。
+#
+# 因此資料來源限定為：Amazon S3 上新北市政府提供的文件
+#   非營利園財報/  6 份（掃描影像 → Bedrock 視覺 OCR）
+#   公校/         15 冊（文字型 → pdfplumber 解析）
+# 需要臨時開啟對外抓取時，設環境變數 GUARDIAN_ALLOW_EXTERNAL_FETCH=1。
+ALLOW_EXTERNAL_FETCH = os.getenv("GUARDIAN_ALLOW_EXTERNAL_FETCH", "0") == "1"
+
+# S3 上存放新北市政府文件的 bucket（唯一的真實資料來源）
+DATA_BUCKET = os.getenv("GUARDIAN_DATA_BUCKET") or None
+
+# ---------------------------------------------------------------- 對外連線白名單
+# 部署到 AWS 對外開放時，只允許這些來源位址連線。
+#
+# 為什麼要在應用層再擋一次（Security Group 已經擋過了）：
+#   Security Group 是網路層的單點防線，一旦被改寬、或服務被放到
+#   ALB／CloudFront 後面而回源沒鎖好，應用就直接裸奔。這個服務沒有身分驗證，
+#   且內含機構財務與民眾投訴內容，破口的代價很高，所以兩層都擋。
+#
+# 重要限制（部署前務必知道）：
+#   IP 白名單不是身分驗證。它只能回答「連線從哪裡來」，無法回答「這是誰」，
+#   因此同一個出口 IP 後面的所有人都會被視為同一個合法使用者，
+#   也無法做操作稽核與權限分級。正式上線仍須加 Cognito／IAM 等身分層。
+DEFAULT_ALLOWED_IPS = [
+    "127.0.0.1", "::1",          # 本機
+    "60.250.71.45",
+    "61.222.117.53",
+    "59.125.121.41",
+    "60.250.71.43",
+]
+# 逗號分隔，支援單一位址與 CIDR（例：203.0.113.0/24）
+ALLOWED_IPS = [
+    s.strip() for s in os.getenv(
+        "GUARDIAN_ALLOWED_IPS", ",".join(DEFAULT_ALLOWED_IPS)).split(",")
+    if s.strip()
+]
+# 是否啟用白名單檢查。綁在 127.0.0.1 本機示範時不需要，
+# 一旦綁到 0.0.0.0 對外服務就必須開啟（cli.py serve 會自動判斷並開啟）。
+ENFORCE_IP_ALLOWLIST = os.getenv("GUARDIAN_ENFORCE_IP_ALLOWLIST", "0") == "1"
+
+# 是否信任 X-Forwarded-For 取真實來源 IP。
+#
+# 只有「確定服務在 ALB／CloudFront／API Gateway 後面」時才可以開啟：
+# 若服務直接對外，用戶端可以自行偽造這個標頭繞過白名單。
+# 預設關閉＝以 TCP 連線來源位址為準，這在直連情境下才是可信的。
+TRUST_PROXY_HEADER = os.getenv("GUARDIAN_TRUST_PROXY_HEADER", "0") == "1"
+# 反向代理自身的位址（信任這些 hop 之後才往前取 XFF）
+TRUSTED_PROXIES = [
+    s.strip() for s in os.getenv("GUARDIAN_TRUSTED_PROXIES", "").split(",") if s.strip()
+]
+
 # ---------------------------------------------------------------- 評分權重
 # 初期採規則式加權，權重集中在此處以便教育局依實務調整。
 #

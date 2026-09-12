@@ -47,6 +47,21 @@
   .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;white-space:nowrap;color:#fff}
   .lv0{background:var(--c1)}.lv1{background:var(--c2)}.lv2{background:var(--c3)}
   .lv3{background:var(--c4);color:#0f1419}.lv4{background:var(--c5)}
+  /* 僅有名冊、無財務與人數資料者：分數不具判讀意義，避免被讀成「低風險」 */
+  .lvNA{background:#495057;color:#dee2e6}
+  tr.rosterOnly td{opacity:.62}
+  .cov{font-size:11px;padding:1px 6px;border-radius:4px;white-space:nowrap;
+       border:1px solid var(--line);color:var(--dim)}
+  .cov-完整{color:var(--c5);border-color:var(--c5)}
+  .cov-部分{color:var(--c3);border-color:var(--c3)}
+  .cov-無資料{color:#adb5bd;border-color:#495057;background:#2b3035}
+  p.note{margin:0;padding:9px 14px;font-size:11.5px;color:var(--dim);
+         border-bottom:1px solid var(--line);line-height:1.6}
+  /* 資料來源標記：真實文件 vs 示範資料集必須一眼分得出來 */
+  .ds{font-size:11px;padding:1px 6px;border-radius:4px;white-space:nowrap;
+      border:1px solid var(--line)}
+  .ds-real{color:#74c0fc;border-color:#1971c2;background:#1971c222}
+  .ds-demo{color:#ffd43b;border-color:#f59f00;background:#f59f0022}
   #map{height:340px;border-radius:0}
   .maphint{padding:8px 14px;color:var(--dim);font-size:11.5px;border-top:1px solid var(--line)}
   .alert{border-left:3px solid var(--c2);background:#20293a;padding:8px 11px;margin-bottom:8px;
@@ -190,24 +205,44 @@ async function loadStats() {
 
 // ---------------------------------------------------------------- 排行榜
 async function loadBoard() {
-  const d = await api('/api/leaderboard?city=新北市&top_n=40');
+  // 取足夠大的上限：僅有名冊的機構分數最低（各項檢核都是 unverifiable），
+  // 用小的 top_n 會把公校決算書名冊那批整批截掉，看起來像「沒抓到公校」。
+  const d = await api('/api/leaderboard?city=新北市&top_n=300');
   rows = d.leaderboard || [];
   if (!rows.length) {
     $('#board').innerHTML = '<p class="empty">尚無評分資料，請先執行全市風險掃描</p>';
     return;
   }
-  $('#board').innerHTML = `<table><caption class="sr">依風險總分排序的機構清單</caption>
+  const cov = d.coverage_summary || {};
+  const ds = d.dataset_summary || {};
+  const covLine = `<p class="note">共 ${rows.length} 間　
+       <span class="ds ds-real">真實文件 ${ds.real||0}</span>
+       <span class="ds ds-demo">示範資料 ${ds.demo||0}</span>　
+       證據完整 ${cov['完整']||0}、部分 ${cov['部分']||0}、僅有名冊 ${cov['無資料']||0}。
+       「真實文件」為新北市政府提供之非營利園財報與公校決算書；決算書屬全市層級，
+       僅提供機構名冊，故該批標為「僅有名冊」，其分數不具判讀意義，請勿視為低風險。
+       官方裁罰／逐園收費／社群輿情三類目前無可用開放資料來源，該三層由示範資料集提供，
+       兩個資料集的同業母體與標準差分開計算。</p>`;
+  $('#board').innerHTML = covLine + `<table><caption class="sr">依風險總分排序的機構清單</caption>
     <thead><tr><th class="num">#</th><th>機構</th><th class="num">總分</th><th>等級</th>
+    <th title="資料來源：真實文件或示範資料集">來源</th>
+    <th title="這個分數背後有多少資料">資料</th>
     <th class="num" title="財務異常子分數">財務</th>
     <th class="num" title="法規遵循子分數">法規</th>
     <th class="num" title="社群輿情子分數">輿情</th>
     <th class="num" title="歷史紀錄子分數">歷史</th></tr></thead>
     <tbody>${rows.map(r => `
-      <tr tabindex="0" role="button" data-id="${esc(r.inst_id)}" aria-selected="false">
+      <tr tabindex="0" role="button" data-id="${esc(r.inst_id)}" aria-selected="false"${
+        r.roster_only ? ' class="rosterOnly"' : ''}>
         <td class="num">${r.rank}</td>
         <td>${esc(r.name.replace('新北市',''))}</td>
-        <td class="num"><b>${r.total.toFixed(1)}</b></td>
-        <td><span class="pill ${LEVELS[r.level]||'lv4'}">${esc(r.level)}</span></td>
+        <td class="num"><b>${r.roster_only ? '—' : r.total.toFixed(1)}</b></td>
+        <td>${r.roster_only
+          ? '<span class="pill lvNA">未能評估</span>'
+          : `<span class="pill ${LEVELS[r.level]||'lv4'}">${esc(r.level)}</span>`}</td>
+        <td><span class="ds ds-${esc(r.dataset)}">${r.dataset === 'real' ? '真實' : '示範'}</span></td>
+        <td><span class="cov cov-${esc(r.data_coverage)}" title="${esc(r.data_coverage_note)}"
+          >${esc(r.data_coverage)}</span></td>
         <td class="num">${r.financial_sub.toFixed(0)}</td>
         <td class="num">${(r.compliance_sub ?? 0).toFixed(0)}</td>
         <td class="num">${r.sentiment_sub.toFixed(0)}</td>

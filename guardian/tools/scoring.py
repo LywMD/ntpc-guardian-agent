@@ -253,12 +253,25 @@ def scan_city(
 
 
 def leaderboard(city: str | None = None, top_n: int = 20, min_score: float = 0.0) -> dict[str, Any]:
-    """風險排行榜：每間機構取最新一次評分。"""
+    """風險排行榜：每間機構取最新一次評分。
+
+    除了分數，另外回傳 data_coverage 標示這個分數背後有多少證據。
+    為什麼需要：公校決算書只提供機構名冊（全市層級決算沒有逐園財務），
+    這些機構沒有財務與人數欄位，各項檢核全部落在 unverifiable，
+    算出來的總分會很低。若只看分數會被讀成「正常、可略過」，
+    但實際上是「沒有資料、還沒被稽查過」——這兩件事必須在畫面上分得開。
+    """
     rows = store.q(
         """
         SELECT s.inst_id, i.name, i.inst_type, i.district, i.address, i.lat, i.lng,
                s.total, s.financial_sub, s.compliance_sub, s.sentiment_sub,
-               s.history_sub, s.level, s.scored_at
+               s.history_sub, s.level, s.scored_at,
+               (SELECT COUNT(*) FROM financials f WHERE f.inst_id = i.inst_id)
+                   AS financial_rows,
+               (SELECT COUNT(*) FROM social_posts p WHERE p.inst_id = i.inst_id)
+                   AS social_rows,
+               i.enrolled, i.staff_count, i.sources,
+               COALESCE(i.dataset, 'real') AS dataset
         FROM scores s
         JOIN institutions i ON i.inst_id = s.inst_id
         JOIN (SELECT inst_id, MAX(scored_at) mx FROM scores GROUP BY inst_id) latest
@@ -269,7 +282,27 @@ def leaderboard(city: str | None = None, top_n: int = 20, min_score: float = 0.0
     for i, r in enumerate(rows):
         r["rank"] = i + 1
         r["total"] = round(r["total"], 1)
-    return {"city": city or "全部", "count": len(rows), "leaderboard": rows}
+        has_fin = (r.get("financial_rows") or 0) > 0
+        has_head = r.get("enrolled") is not None and r.get("staff_count") is not None
+        present = sum((has_fin, has_head, (r.get("social_rows") or 0) > 0))
+        if present == 0:
+            coverage, note = "無資料", "僅有機構名冊，無財務與人數欄位，分數不具判讀意義"
+        elif present == 3:
+            coverage, note = "完整", ""
+        else:
+            missing = [n for n, ok in (("財務", has_fin), ("人數/人員", has_head),
+                                       ("輿情", (r.get("social_rows") or 0) > 0)) if not ok]
+            coverage, note = "部分", "缺" + "、".join(missing)
+        r["data_coverage"] = coverage
+        r["data_coverage_note"] = note
+        r["roster_only"] = coverage == "無資料"
+    return {"city": city or "全部", "count": len(rows), "leaderboard": rows,
+            "coverage_summary": {
+                k: sum(1 for r in rows if r["data_coverage"] == k)
+                for k in ("完整", "部分", "無資料")},
+            "dataset_summary": {
+                k: sum(1 for r in rows if r["dataset"] == k)
+                for k in ("real", "demo")}}
 
 
 def alerts(limit: int = 30, include_acked: bool = False) -> dict[str, Any]:

@@ -18,7 +18,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .. import aws, store
+from .. import aws, config, store
 
 log = logging.getLogger("guardian.sentiment")
 
@@ -38,12 +38,33 @@ NEG_LEXICON: dict[str, tuple[list[str], float]] = {
                 "已讀不回", "推卸責任", "隱瞞", "投訴沒用", "園長很兇"], 1.3),
 }
 POS_WORDS = ["用心", "耐心", "很棒", "推薦", "乾淨", "放心", "喜歡上學", "進步", "細心",
-             "溝通良好", "很有愛心", "貼心", "安心", "值得", "專業"]
+             "溝通良好", "很有愛心", "貼心", "安心", "值得", "專業",
+             # 補齊正面詞：負面偵測有詞表加樣式兩層，正面只有詞表一層，
+             # 若正面詞太少會讓整體情感系統性偏負，異常判定跟著失準。
+             "態度很好", "態度好", "主動溝通", "願意溝通", "有耐心", "很滿意",
+             "改善很多", "願意配合", "師資穩定", "回應很快", "處理得宜"]
 NEGATORS = ["沒有", "不會", "不曾", "並未", "未曾", "沒", "不"]
 INTENSIFIERS = {"非常": 1.6, "超": 1.5, "很": 1.3, "太": 1.4, "極": 1.7, "根本": 1.5,
                 "完全": 1.5, "有點": 0.7, "稍微": 0.6, "還算": 0.5}
 
 _ALL_NEG = [(w, cat, wt) for cat, (words, wt) in NEG_LEXICON.items() for w in words]
+
+# 主題詞 + 負面評價詞的樣式比對。
+#
+# 為什麼需要：純子字串比對抓不到中間插入語氣詞的寫法——詞表有「衛生很差」，
+# 但家長實際會寫「衛生也很差」、「衛生真的很差」，多一個字就整句漏掉。
+# 這裡允許主題詞與評價詞之間出現最多 4 個非標點字元。
+NEG_PATTERNS: list[tuple[str, str, float]] = [
+    (r"衛生[^。；！？\n]{0,4}(?:差|髒|不佳|不好|堪憂|有問題)", "餐飲衛生", 2.4),
+    (r"餐點[^。；！？\n]{0,4}(?:差|難吃|不新鮮|有問題)", "餐飲衛生", 2.4),
+    (r"環境[^。；！？\n]{0,4}(?:髒|差|不佳|堪憂)", "餐飲衛生", 2.0),
+    (r"態度[^。；！？\n]{0,4}(?:差|惡劣|不好|很兇)", "人員與行政", 1.3),
+    (r"安全[^。；！？\n]{0,4}(?:堪憂|有問題|不足|沒顧好)", "公共安全", 2.4),
+    (r"師資[^。；！？\n]{0,4}(?:流動|不穩|一直換)", "人員與行政", 1.3),
+    (r"(?:收費|費用)[^。；！？\n]{0,6}(?:不透明|不清楚|亂|沒說明)", "收費爭議", 1.6),
+    (r"(?:打|捏|推)[^。；！？\n]{0,2}(?:小孩|孩子|幼兒|學生)", "身體不當對待", 3.0),
+]
+_NEG_PATTERNS_C = [(re.compile(p), cat, wt) for p, cat, wt in NEG_PATTERNS]
 
 
 _jieba_ready = False
@@ -98,6 +119,23 @@ def analyze_text(text: str) -> dict[str, Any]:
         hits.append({"keyword": word, "category": category,
                      "weight": round(weight * boost, 2)})
 
+    # 樣式比對：補抓「衛生也很差」這類中間插入語氣詞、子字串比對會漏掉的寫法。
+    # 同一類別若已由詞表命中就不重複加權，避免同一件事被算兩次。
+    hit_categories = {h["category"] for h in hits}
+    for pat, category, weight in _NEG_PATTERNS_C:
+        m = pat.search(text)
+        if not m:
+            continue
+        window = text[max(0, m.start() - 4): m.start()]
+        if any(neg in window for neg in NEGATORS):
+            continue
+        if category in hit_categories:
+            continue
+        neg_weight += weight
+        hit_categories.add(category)
+        hits.append({"keyword": m.group(0), "category": category,
+                     "weight": round(weight, 2), "matched_by": "pattern"})
+
     pos_weight = sum(1.0 for w in POS_WORDS if w in text)
     raw = pos_weight - neg_weight
     sentiment = math.tanh(raw / 3.0)
@@ -140,9 +178,17 @@ def _llm_recheck(texts: list[str]) -> list[dict[str, Any]] | None:
 
 # ------------------------------------------------------------------ live 爬取
 def _try_live_social(inst_name: str, timeout: float = 8.0) -> tuple[list[dict[str, Any]], list[str]]:
-    """嘗試抓取真實公開討論。失敗不阻斷，只記錄原因。"""
+    """嘗試抓取真實公開討論。失敗不阻斷，只記錄原因。
+
+    預設不執行：config.ALLOW_EXTERNAL_FETCH 為 False 時直接返回。
+    停用原因見 config 的資料來源政策——PTT 搜尋頁只能取到標題，
+    無法確認該標題真的在討論這間機構，誤植到特定幼兒園身上是實質傷害。
+    """
     notes: list[str] = []
     found: list[dict[str, Any]] = []
+    if not config.ALLOW_EXTERNAL_FETCH:
+        return [], ["已停用對外爬取（資料來源限定 AWS S3）；"
+                    "如需開啟請設 GUARDIAN_ALLOW_EXTERNAL_FETCH=1"]
     try:
         import requests
         from bs4 import BeautifulSoup
