@@ -65,10 +65,22 @@ if ($authExit -ne 0) {
     Say "  完成後再跑一次 .\publish.ps1" Yellow
     exit 1
 }
-$login = (& $GH api user --jq .login).Trim()
-$fullName = (& $GH api user --jq '.name // .login').Trim()
-$email = (& $GH api user --jq '.email // ""').Trim()
-if (-not $email) { $email = "$login@users.noreply.github.com" }
+# 不用 --jq：PowerShell 傳參數給原生程式時會吃掉嵌在引號裡的引號，
+# 造成 jq 收到未閉合的字串。直接取 JSON 自己解析最穩。
+$userRaw = & $GH api user
+if ($LASTEXITCODE -ne 0 -or -not $userRaw) {
+    Die "無法取得 GitHub 使用者資訊。請重跑：& `"$GH`" auth login"
+}
+try {
+    $me = ($userRaw | Out-String) | ConvertFrom-Json
+} catch {
+    Die "GitHub API 回應無法解析：$($_.Exception.Message)"
+}
+
+$login = $me.login
+if (-not $login) { Die "GitHub API 未回傳 login，請重新登入。" }
+$fullName = if ($me.name) { $me.name } else { $login }
+$email = if ($me.email) { $me.email } else { "$login@users.noreply.github.com" }
 Say "  OK  已登入為 $login（$fullName / $email）"
 
 # ---------------------------------------------------------------- 2. 安全檢查
@@ -118,7 +130,7 @@ Step "4/5" "建立 GitHub repo（$visibility）"
 
 $prevEA = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-& $GH repo view "$login/$Name" --json name *> $null
+& $GH repo view "$login/$Name" *> $null
 $repoExists = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = $prevEA
 if ($repoExists) {
