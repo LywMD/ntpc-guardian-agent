@@ -1,4 +1,7 @@
-# 版本鎖定為本機實測通過的組合（Python 3.14 / Windows）
+# 版本鎖定為本機實測通過的組合（Python 3.14 / Windows）。
+# 部署到其他 Python 版本的機器（例如 EC2 上 Amazon Linux 內建的 3.11）時，
+# 鎖死的版本可能沒有對應的 wheel；scipy 尤其容易撞到這點，因此改用範圍
+# 而非精確鎖定，讓 pip 自己選一個跟當下 Python 相容的版本。
 boto3==1.43.93                # Bedrock Converse、S3
 requests==2.34.2              # 官方公開資料與社群爬取
 beautifulsoup4==4.15.0        # HTML 解析
@@ -6,6 +9,6 @@ lxml==6.1.3                   # BeautifulSoup 的高速 parser
 pdfplumber==0.11.10           # 非結構化決算報告 PDF → 結構化欄位
 jieba==0.42.1                 # 中文分詞
 rapidfuzz==3.14.6             # 機構名稱模糊比對（統一機構 ID）
-scipy==1.18.1                 # Benford 卡方檢定（缺少時有純 Python 備援）
+scipy>=1.11,<2                # Benford 卡方檢定（缺少或裝不上時有純 Python 備援）
 fastapi==0.141.1              # API 層
 uvicorn==0.52.4               # ASGI server
