@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小小守護員｜兒少機構風險稽查智能代理人</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{
+    --bg:#0f1419; --panel:#171d24; --panel2:#1e252e; --line:#2a3340;
+    --txt:#e6edf3; --dim:#8b98a5; --accent:#4dabf7;
+    --c1:#e03131; --c2:#f76707; --c3:#f59f00; --c4:#4dabf7; --c5:#37b24d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif;
+       background:var(--bg);color:var(--txt);font-size:14px;line-height:1.6}
+  header{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:700}
+  h1 small{font-weight:400;color:var(--dim);font-size:12px;margin-left:8px}
+  .stats{display:flex;gap:16px;flex-wrap:wrap;margin-left:auto;color:var(--dim);font-size:12px}
+  .stats b{color:var(--txt)}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;padding:10px 20px;background:var(--panel2);
+           border-bottom:1px solid var(--line);align-items:center}
+  button{background:#26303c;color:var(--txt);border:1px solid var(--line);border-radius:6px;
+         padding:6px 13px;cursor:pointer;font-size:13px;font-family:inherit}
+  button:hover:not(:disabled){background:#31404f;border-color:#3d4d5e}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:#1971c2;border-color:#1971c2}
+  button.primary:hover:not(:disabled){background:#1c7ed6}
+  #status{color:var(--dim);font-size:12px;margin-left:auto}
+  main{display:grid;grid-template-columns:minmax(340px,1fr) minmax(320px,1.1fr) minmax(340px,1.2fr);
+       gap:12px;padding:12px;align-items:start}
+  @media(max-width:1200px){main{grid-template-columns:1fr}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  section > h2{font-size:13px;margin:0;padding:10px 14px;background:var(--panel2);
+               border-bottom:1px solid var(--line);font-weight:600;letter-spacing:.3px}
+  .body{padding:12px 14px;max-height:70vh;overflow:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 6px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:500;font-size:11.5px;position:sticky;top:0;background:var(--panel)}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#20293380}
+  tbody tr[aria-selected=true]{background:#1971c233;outline:1px solid var(--accent)}
+  .pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;white-space:nowrap;color:#fff}
+  .lv0{background:var(--c1)}.lv1{background:var(--c2)}.lv2{background:var(--c3)}
+  .lv3{background:var(--c4);color:#0f1419}.lv4{background:var(--c5)}
+  #map{height:340px;border-radius:0}
+  .maphint{padding:8px 14px;color:var(--dim);font-size:11.5px;border-top:1px solid var(--line)}
+  .alert{border-left:3px solid var(--c2);background:#20293a;padding:8px 11px;margin-bottom:8px;
+         border-radius:0 5px 5px 0;font-size:12.5px}
+  .alert.threshold{border-color:var(--c1)} .alert.sentiment{border-color:var(--c2)}
+  .alert.spike{border-color:var(--c3)}
+  .alert .k{color:var(--dim);font-size:11px;display:block}
+  .bars{margin:8px 0}
+  .bar{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:12px}
+  .bar span:first-child{width:74px;color:var(--dim);flex-shrink:0}
+  .bar .track{flex:1;height:9px;background:#252e39;border-radius:5px;overflow:hidden}
+  .bar .fill{height:100%;border-radius:5px}
+  .bar .v{width:40px;text-align:right;font-variant-numeric:tabular-nums}
+  .ev{border-left:2px solid var(--line);padding:4px 0 4px 10px;margin:5px 0;
+      color:#c9d4de;font-size:12.5px}
+  .kv{display:grid;grid-template-columns:88px 1fr;gap:2px 10px;font-size:12.5px;margin-bottom:10px}
+  .kv dt{color:var(--dim)} .kv dd{margin:0}
+  h4.sub{margin:12px 0 5px;font-size:12.5px;color:var(--accent);font-weight:600;
+         border-bottom:1px solid var(--line);padding-bottom:3px}
+  p.hint{color:var(--dim);font-size:11.5px;margin:3px 0 6px}
+  table.mini{font-size:11.5px;margin-bottom:4px}
+  table.mini th,table.mini td{padding:3px 5px}
+  .viol{border-left:3px solid var(--line);padding:5px 0 5px 9px;margin:6px 0;font-size:12px}
+  .viol.s3{border-color:var(--c1)} .viol.s2{border-color:var(--c3)} .viol.s1{border-color:var(--c4)}
+  .viol .vh{margin-bottom:2px} .viol .vh b{margin-left:5px}
+  .viol .vd{color:#c9d4de} .viol .vc{color:var(--dim);font-size:11px;margin-top:2px}
+  .viol .vc a{color:var(--accent);margin-left:6px}
+  #chatlog{height:300px;overflow:auto;padding:10px 14px;background:#131a21}
+  .msg{margin-bottom:12px;font-size:13px}
+  .msg .who{font-size:11px;color:var(--dim);margin-bottom:3px}
+  .msg.me .bubble{background:#1971c233;border:1px solid #1971c266}
+  .msg .bubble{background:var(--panel2);border:1px solid var(--line);padding:8px 11px;
+               border-radius:7px;white-space:pre-wrap;word-break:break-word}
+  .msg .tools{font-size:11px;color:var(--dim);margin-top:4px;font-family:ui-monospace,monospace}
+  .chatbar{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line)}
+  .chatbar input{flex:1;background:#131a21;border:1px solid var(--line);color:var(--txt);
+                 border-radius:6px;padding:7px 11px;font-family:inherit;font-size:13px}
+  .chatbar input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--dim);
+        border-top-color:transparent;border-radius:50%;animation:s .7s linear infinite;
+        vertical-align:-1px}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .empty{color:var(--dim);text-align:center;padding:24px 10px;font-size:12.5px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}
+  .chip{background:#26303c;border:1px solid var(--line);border-radius:12px;padding:3px 10px;
+        font-size:11.5px;cursor:pointer}
+  .chip:hover{background:#31404f}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+</style>
+</head>
+<body>
+<header>
+  <h1>小小守護員 <small>兒少機構風險稽查智能代理人｜Amazon Bedrock</small></h1>
+  <div class="stats" id="stats" aria-live="polite"></div>
+</header>
+
+<div class="toolbar">
+  <button id="btnEtl">① 執行資料整合 ETL</button>
+  <button id="btnScan" class="primary">② 全市風險掃描</button>
+  <button id="btnCompliance">③ 法規遵循掃描</button>
+  <button id="btnBaseline">④ 全體統計基準</button>
+  <button id="btnPerceive">⑤ 感知層訊號</button>
+  <button id="btnAgentScan">⑥ Agent 自主掃描（LLM）</button>
+  <button id="btnTrain">訓練監督式模型</button>
+  <span id="status" role="status" aria-live="polite"></span>
+</div>
+
+<main>
+  <section aria-labelledby="h-board">
+    <h2 id="h-board">風險排行榜</h2>
+    <div class="body" id="board"><p class="empty">先按「全市風險掃描」產生分數</p></div>
+  </section>
+
+  <section aria-labelledby="h-map">
+    <h2 id="h-map">地理分佈熱區</h2>
+    <div id="map" role="application" aria-label="機構風險地理分佈圖"></div>
+    <p class="maphint">圓點大小與顏色代表風險分數；點擊可帶出右側明細。地圖圖磚需連外網，
+      無法載入時請直接使用左側排行榜。</p>
+    <h2>主動預警</h2>
+    <div class="body" id="alerts" style="max-height:26vh"><p class="empty">尚無預警</p></div>
+  </section>
+
+  <section aria-labelledby="h-detail">
+    <h2 id="h-detail">機構明細　<span style="font-weight:400;color:var(--dim)">
+      師生比依幼照法§16分年齡層判定</span></h2>
+    <div class="body" id="detail"><p class="empty">從排行榜或地圖選一間機構</p></div>
+    <h2>向 Agent 追問</h2>
+    <div id="chatlog" role="log" aria-label="與 Agent 的對話紀錄"></div>
+    <div class="chips">
+      <button class="chip">新北市風險最高的三間機構是哪些？為什麼？</button>
+      <button class="chip">有哪些機構是「全園合併師生比合格、但2歲專班已違規」？</button>
+      <button class="chip">哪些機構有可以直接開罰的違規？請引用條號</button>
+      <button class="chip">青草地幼兒園的財報數字有沒有異常？</button>
+    </div>
+    <form class="chatbar" id="chatform">
+      <label class="sr" for="q">問題</label>
+      <input id="q" placeholder="例如：這間機構為什麼分數升高？" autocomplete="off">
+      <button type="submit" class="primary" id="send">送出</button>
+    </form>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const LEVELS = {'極高風險':'lv0','高風險':'lv1','中風險':'lv2','低風險':'lv3','正常':'lv4'};
+const COLORS = {'極高風險':'#e03131','高風險':'#f76707','中風險':'#f59f00',
+                '低風險':'#4dabf7','正常':'#37b24d'};
+let sessionId = null, map = null, layer = null, rows = [], selected = null;
+
+function status(t, busy) {
+  $('#status').innerHTML = busy ? `<span class="spin"></span> ${esc(t)}` : esc(t);
+}
+function lockButtons(lock) {
+  document.querySelectorAll('.toolbar button').forEach(b => b.disabled = lock);
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+  return r.json();
+}
+async function post(path, body) {
+  return api(path, {method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(body || {})});
+}
+
+// ---------------------------------------------------------------- 統計
+async function loadStats() {
+  try {
+    const h = await api('/api/health');
+    const d = h.db;
+    $('#stats').innerHTML =
+      `機構 <b>${d.institutions}</b>　決算明細 <b>${d.financial_rows}</b>　` +
+      `輿情貼文 <b>${d.social_posts}</b>　已評分 <b>${d.scored}</b>　` +
+      `模型 <b>${esc((h.model_id || 'N/A').replace(/^(us|global)\./, ''))}</b>` +
+      (h.ok ? '' : ' ⚠ AWS 未連線');
+  } catch (e) { $('#stats').textContent = 'AWS/API 連線異常'; }
+}
+
+// ---------------------------------------------------------------- 排行榜
+async function loadBoard() {
+  const d = await api('/api/leaderboard?city=新北市&top_n=40');
+  rows = d.leaderboard || [];
+  if (!rows.length) {
+    $('#board').innerHTML = '<p class="empty">尚無評分資料，請先執行全市風險掃描</p>';
+    return;
+  }
+  $('#board').innerHTML = `<table><caption class="sr">依風險總分排序的機構清單</caption>
+    <thead><tr><th class="num">#</th><th>機構</th><th class="num">總分</th><th>等級</th>
+    <th class="num" title="財務異常子分數">財務</th>
+    <th class="num" title="法規遵循子分數">法規</th>
+    <th class="num" title="社群輿情子分數">輿情</th>
+    <th class="num" title="歷史紀錄子分數">歷史</th></tr></thead>
+    <tbody>${rows.map(r => `
+      <tr tabindex="0" role="button" data-id="${esc(r.inst_id)}" aria-selected="false">
+        <td class="num">${r.rank}</td>
+        <td>${esc(r.name.replace('新北市',''))}</td>
+        <td class="num"><b>${r.total.toFixed(1)}</b></td>
+        <td><span class="pill ${LEVELS[r.level]||'lv4'}">${esc(r.level)}</span></td>
+        <td class="num">${r.financial_sub.toFixed(0)}</td>
+        <td class="num">${(r.compliance_sub ?? 0).toFixed(0)}</td>
+        <td class="num">${r.sentiment_sub.toFixed(0)}</td>
+        <td class="num">${r.history_sub.toFixed(0)}</td>
+      </tr>`).join('')}</tbody></table>`;
+  $('#board').querySelectorAll('tbody tr').forEach(tr => {
+    const pick = () => selectInst(tr.dataset.id);
+    tr.addEventListener('click', pick);
+    tr.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+    });
+  });
+  drawMap();
+}
+
+// ---------------------------------------------------------------- 地圖
+function drawMap() {
+  if (typeof L === 'undefined') return;
+  if (!map) {
+    map = L.map('map', {scrollWheelZoom:false}).setView([25.02, 121.47], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {maxZoom:18, attribution:'© OpenStreetMap'}).addTo(map);
+  }
+  if (layer) map.removeLayer(layer);
+  layer = L.layerGroup().addTo(map);
+  rows.filter(r => r.lat && r.lng).forEach(r => {
+    L.circleMarker([r.lat, r.lng], {
+      radius: 5 + r.total / 9, color:'#0f1419', weight:1,
+      fillColor: COLORS[r.level] || '#37b24d', fillOpacity:.82
+    }).addTo(layer)
+      .bindTooltip(`${r.name.replace('新北市','')}<br>${r.total.toFixed(1)} ${r.level}`)
+      .on('click', () => selectInst(r.inst_id));
+  });
+}
+
+// ---------------------------------------------------------------- 明細
+function bar(label, v, color) {
+  return `<div class="bar"><span>${esc(label)}</span>
+    <span class="track"><span class="fill" style="width:${Math.min(100,v)}%;background:${color}"></span></span>
+    <span class="v">${v.toFixed(1)}</span></div>`;
+}
+async function selectInst(id) {
+  selected = id;
+  document.querySelectorAll('#board tbody tr').forEach(tr =>
+    tr.setAttribute('aria-selected', tr.dataset.id === id));
+  $('#detail').innerHTML = '<p class="empty"><span class="spin"></span> 分析中…</p>';
+  try {
+    const d = await api(`/api/institution/${encodeURIComponent(id)}/detail`);
+    const p = d.profile.institution, f = d.forensic, s = d.sentiment, h = d.history;
+    const cp = d.compliance || {};
+    const ra = f.signals.ratio_analysis, b = f.signals.benford_first_digit,
+          c = f.signals.cross_check, m = ra.metrics || {};
+    const latest = d.score_history[0];
+    const bandRows = (ra.ratio_by_age_band || []).map(x => {
+      const bad = (x.over_legal_pct || 0) > 0;
+      return `<tr>
+        <td>${esc(x.band)}</td>
+        <td class="num">${x.children ?? '-'}</td>
+        <td class="num">${x.staff ?? '-'}</td>
+        <td class="num"${bad ? ' style="color:var(--c1);font-weight:700"' : ''}>
+          1:${x.ratio ?? '-'}</td>
+        <td class="num">1:${x.legal_limit != null ? x.legal_limit.toFixed(0) : '-'}</td>
+        <td class="num">${x.z_score ?? '-'}</td>
+        <td>${bad ? '<span class="pill lv0">超標</span>' : '<span class="pill lv4">合格</span>'}</td>
+      </tr>`;
+    }).join('');
+    const violRows = (cp.violations || []).map(v => `
+      <div class="viol s${v.severity}">
+        <div class="vh"><span class="pill ${v.severity===3?'lv0':v.severity===2?'lv2':'lv3'}">${esc(v.severity_label)}</span>
+          <b>${esc(v.indicator)}</b></div>
+        <div class="vd">實際：${esc(String(v.observed))}</div>
+        <div class="vd">應為：${esc(String(v.required))}</div>
+        <div class="vc">${esc(v.citation.law + v.citation.article)}${
+          v.penalty ? '　罰則 ' + esc(v.penalty.law + v.penalty.article) : ''}
+          ${v.citation.url ? `<a href="${esc(v.citation.url)}" target="_blank" rel="noopener">原文</a>` : ''}</div>
+      </div>`).join('');
+    const baseRows = ((ra.baseline || {}).comparisons || []).slice(0, 6).map(x => `
+      <tr><td>${esc(x.indicator)}</td><td class="num">${x.value}</td>
+      <td class="num">${x.citywide_mean}</td>
+      <td class="num"${Math.abs(x.z_score) >= 2 ? ' style="color:var(--c1);font-weight:700"' : ''}>${x.z_score}</td>
+      <td>${esc(x.level)}</td></tr>`).join('');
+
+    $('#detail').innerHTML = `
+      <h3 style="margin:0 0 8px;font-size:15px">${esc(p.name)}</h3>
+      <dl class="kv">
+        <dt>統一 ID</dt><dd>${esc(p.inst_id)}</dd>
+        <dt>類型 / 區</dt><dd>${esc(p.inst_type)} / ${esc(p.district)}</dd>
+        <dt>地址</dt><dd>${esc(p.address)}</dd>
+        <dt>在園 / 人員</dt><dd>${p.enrolled} 人（2歲專班 ${p.enrolled_2y ?? '-'}／3歲以上 ${p.enrolled_3to5 ?? '-'}）
+          / 教保人員 ${p.staff_count} 人</dd>
+        <dt>核定招收</dt><dd>${p.capacity ?? '-'} 人${
+          (p.enrolled && p.capacity && p.enrolled > p.capacity)
+            ? ` <span class="pill lv0">超收 ${p.enrolled - p.capacity} 人</span>` : ''}</dd>
+        <dt>評鑑</dt><dd>${esc(p.rating || '無資料')}　裁罰 ${h.penalty_count} 次</dd>
+        ${latest ? `<dt>風險總分</dt><dd><b>${latest.total.toFixed(1)}</b>
+          <span class="pill ${LEVELS[latest.level]||'lv4'}">${esc(latest.level)}</span></dd>` : ''}
+      </dl>
+      <div class="bars">
+        ${bar('財務異常', f.financial_subscore, '#e03131')}
+        ${bar('法規遵循', cp.compliance_subscore || 0, '#c2255c')}
+        ${bar('社群輿情', s.sentiment_subscore || 0, '#f76707')}
+        ${bar('歷史紀錄', h.history_subscore, '#f59f00')}
+      </div>
+
+      <h4 class="sub">師生比（依幼照法§16分年齡層計算）</h4>
+      <table class="mini"><thead><tr><th>年齡層</th><th class="num">幼兒</th>
+        <th class="num">人員</th><th class="num">實際</th><th class="num">法定</th>
+        <th class="num">z</th><th>判定</th></tr></thead>
+        <tbody>${bandRows || '<tr><td colspan="7">無資料</td></tr>'}</tbody></table>
+      <p class="hint">全園合併 1:${m.blended_ratio ?? '-'}　※合併值僅供趨勢觀察，不作為合規判定依據</p>
+
+      <h4 class="sub">法規遵循檢核（${cp.violation_count ?? 0} 項違規／重大 ${cp.critical_count ?? 0} 項）</h4>
+      ${violRows || '<p class="hint">未發現違規項目</p>'}
+      ${(cp.unverifiable || []).length
+        ? `<p class="hint">待補資料 ${cp.unverifiable.length} 項（不得視為合規）：`
+          + cp.unverifiable.map(u => esc(u.indicator)).join('、') + '</p>'
+        : ''}
+
+      <h4 class="sub">全體統計定位（母體 ${(ra.baseline||{}).population ?? '-'} 間）</h4>
+      <table class="mini"><thead><tr><th>指標</th><th class="num">本園</th>
+        <th class="num">全市均</th><th class="num">z</th><th>分級</th></tr></thead>
+        <tbody>${baseRows || '<tr><td colspan="5">無資料</td></tr>'}</tbody></table>
+
+      <h4 class="sub">鑑識會計</h4>
+      <p class="hint">三訊號　比率 ${ra.score} ／ Benford ${b.score ?? '-'} ／ 交叉比對 ${c.score ?? '-'}</p>
+      <dl class="kv">
+        <dt>人事費占比</dt><dd>${m.hr_expense_pct != null ? (m.hr_expense_pct*100).toFixed(1)+'%' : '-'}</dd>
+        <dt>推估月薪</dt><dd>${m.avg_monthly_salary ? Number(m.avg_monthly_salary).toLocaleString() : '-'} 元</dd>
+        <dt>Benford</dt><dd>n=${b.n ?? '-'}　MAD=${b.MAD ?? '-'}　p=${b.p_value ?? '-'}
+          → ${esc(b.conclusion || '-')}</dd>
+        <dt>收入比對</dt><dd>預期 ${Number(c.expected_revenue||0).toLocaleString()}
+          vs 申報 ${Number(c.reported_revenue||0).toLocaleString()}
+          （${((c.gap_pct||0)*100).toFixed(1)}%）</dd>
+        <dt>輿情</dt><dd>${s.post_count||0} 則／負面 ${s.negative_count||0} 則
+          ${Object.keys(s.category_hits||{}).length ? '｜'+esc(Object.keys(s.category_hits).join('、')) : ''}</dd>
+      </dl>
+      <h4 class="sub">證據</h4>
+      ${(f.evidence||[]).map(e => `<p class="ev">${esc(e)}</p>`).join('')}
+      ${(s.top_evidence||[]).slice(0,4).map(e => `<p class="ev">[${esc(e.platform)} ${esc(e.posted_at)}]
+        ${esc((e.categories||[]).join('、'))}：${esc(e.quote)}</p>`).join('')}
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button id="btnWhy">問 Agent：為什麼是這個分數？</button>
+        <button id="btnDeep">Agent 深入調查</button>
+      </div>`;
+    $('#btnWhy').onclick = () => sendChat(`${p.name} 為什麼是這個分數？請引用具體數字說明。`);
+    $('#btnDeep').onclick = () => sendChat(
+      `請深入調查 ${p.name}（inst_id=${p.inst_id}），跑完鑑識會計三項訊號與輿情分析，` +
+      `依證據決定是否加派更深的檢定，並給出建議處置。`);
+  } catch (e) {
+    $('#detail').innerHTML = `<p class="empty">讀取失敗：${esc(e.message)}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------- 預警
+async function loadAlerts() {
+  const d = await api('/api/alerts?limit=30');
+  const a = d.alerts || [];
+  $('#alerts').innerHTML = a.length ? a.map(x => `
+    <div class="alert ${esc(x.kind)}"><span class="k">${esc(x.created_at?.slice(0,16))}
+      ｜${esc(x.kind)}</span>${esc(x.message)}</div>`).join('')
+    : '<p class="empty">尚無預警</p>';
+}
+
+// ---------------------------------------------------------------- 對話
+function addMsg(who, text, cls, tools) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + (cls || '');
+  d.innerHTML = `<div class="who">${esc(who)}</div><div class="bubble">${esc(text)}</div>` +
+                (tools ? `<div class="tools">${esc(tools)}</div>` : '');
+  $('#chatlog').appendChild(d);
+  $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
+  return d;
+}
+async function sendChat(text) {
+  if (!text.trim()) return;
+  addMsg('稽查人員', text, 'me');
+  $('#q').value = '';
+  $('#send').disabled = true;
+  const ph = addMsg('小小守護員', '正在規劃調查步驟並呼叫工具…', '');
+  try {
+    const r = await post('/api/chat', {message: text, session_id: sessionId});
+    sessionId = r.session_id;
+    const steps = (r.trace || []).map(t => `#${t.step} ${t.tool}`).join('  ');
+    ph.querySelector('.bubble').textContent = r.answer;
+    if (steps) {
+      const d = document.createElement('div');
+      d.className = 'tools';
+      d.textContent = `工具呼叫 ${r.tool_calls} 次：${steps}（${(r.elapsed_ms/1000).toFixed(1)}s）`;
+      ph.appendChild(d);
+    }
+    loadAlerts(); loadStats();
+  } catch (e) {
+    ph.querySelector('.bubble').textContent = '呼叫失敗：' + e.message;
+  } finally {
+    $('#send').disabled = false;
+    $('#chatlog').scrollTop = $('#chatlog').scrollHeight;
+  }
+}
+
+// ---------------------------------------------------------------- 事件
+$('#chatform').addEventListener('submit', e => { e.preventDefault(); sendChat($('#q').value); });
+document.querySelectorAll('.chip').forEach(c =>
+  c.addEventListener('click', () => sendChat(c.textContent.trim())));
+
+$('#btnEtl').onclick = async () => {
+  lockButtons(true); status('執行 ETL：爬取／清洗官方公開資料…', true);
+  try {
+    const r = await post('/api/etl', {city:'新北市'});
+    status(`ETL 完成（來源 ${r.source_mode}）：機構 ${r.institutions_upserted} 筆、`
+         + `決算明細 ${r.financial_rows} 筆、輿情 ${r.social_posts} 筆`);
+    loadStats();
+  } catch (e) { status('ETL 失敗：' + e.message); }
+  finally { lockButtons(false); }
+};
+
+$('#btnScan').onclick = async () => {
+  lockButtons(true); status('全市掃描中（鑑識會計＋輿情＋評分，約需 20–40 秒）…', true);
+  try {
+    const r = await post('/api/scan', {city:'新北市', reset_history:false});
+    status(`掃描完成：${r.scanned} 間，等級分佈 `
+         + Object.entries(r.risk_distribution).map(([k,v])=>`${k} ${v}`).join('／')
+         + `；自動加派深查 ${r.escalated_institutions.length} 間`);
+    await loadBoard(); await loadAlerts(); loadStats();
+  } catch (e) { status('掃描失敗：' + e.message); }
+  finally { lockButtons(false); }
+};
+
+$('#btnCompliance').onclick = async () => {
+  lockButtons(true); status('法規遵循檢核中（分年齡層判定師生比與班級人數）…', true);
+  try {
+    const r = await api('/api/compliance?city=新北市');
+    status(`法規遵循：受檢 ${r.scanned} 間／有違規 ${r.with_violations} 間／`
+         + `有重大違規 ${r.with_critical} 間`);
+    const freq = Object.entries(r.violation_frequency).slice(0, 10)
+      .map(([k, v]) => `• ${v} 間　${k}`).join('\n');
+    addMsg('法規遵循檢核工具',
+      `受檢 ${r.scanned} 間，${r.with_violations} 間有違規、${r.with_critical} 間有重大違規。\n\n`
+      + `違規項目出現頻率：\n${freq}\n\n`
+      + `法規遵循風險最高：\n`
+      + r.results.filter(x => x.violation_count).slice(0, 6)
+          .map(x => `• ${x.name.replace('新北市','')}　子分數 ${x.compliance_subscore}`
+                  + `（違規 ${x.violation_count}／重大 ${x.critical_count}）`).join('\n'), '');
+  } catch (e) { status('失敗：' + e.message); }
+  finally { lockButtons(false); }
+};
+
+$('#btnBaseline').onclick = async () => {
+  lockButtons(true); status('計算全體統計基準與標準差門檻…', true);
+  try {
+    const [b, ds] = await Promise.all([
+      api('/api/baseline?city=新北市'),
+      api('/api/district-stability?city=新北市')
+    ]);
+    status(`全體統計：母體 ${b.population} 間、${Object.keys(b.indicators).length} 項指標；`
+         + `${ds.underpowered_districts.length}/${ds.districts.length} 區樣本不足`);
+    const lines = Object.values(b.indicators).map(s => {
+      const th = s.thresholds[`異常（${b.sigma_bands.abnormal}σ）`];
+      return `• ${s.label}　n=${s.n}　平均 ${s.mean}　標準差 ${s.std}`
+           + `　2σ 區間 [${th.lower}, ${th.upper}]`;
+    }).join('\n');
+    addMsg('全體統計基準',
+      `母體：${b.population} 間（全市所有機構）\n`
+      + `σ 門檻：${b.sigma_bands.observe}σ 觀察／${b.sigma_bands.abnormal}σ 異常／`
+      + `${b.sigma_bands.critical}σ 重大偏離\n\n${lines}\n\n`
+      + `區域穩定度：${ds.recommendation}`, '');
+  } catch (e) { status('失敗：' + e.message); }
+  finally { lockButtons(false); }
+};
+
+$('#btnPerceive').onclick = async () => {
+  lockButtons(true); status('讀取感知層訊號…', true);
+  try {
+    const r = await api('/api/perceive?city=新北市');
+    status(`感知：未處理預警 ${r.open_alerts} 則／分數驟升 ${r.score_spikes.length} 間／`
+         + `近期負面 ${r.recent_negative_buzz.length} 間`);
+    addMsg('感知層', (r.triggers.length
+      ? r.triggers.slice(0,8).map(t => `• [${t.type}] ${t.name}：${t.reason}`).join('\n')
+      : '目前沒有需要主動介入的訊號'), '');
+    loadAlerts();
+  } catch (e) { status('失敗：' + e.message); }
+  finally { lockButtons(false); }
+};
+
+$('#btnAgentScan').onclick = async () => {
+  lockButtons(true); status('Agent 自主規劃全市掃描（會多次呼叫 Bedrock，約 1–3 分鐘）…', true);
+  addMsg('稽查人員', '全面掃描新北市所有機構，找出最需要優先稽查的對象', 'me');
+  const ph = addMsg('小小守護員', 'Agent 正在自主規劃與交叉驗證…', '');
+  try {
+    const r = await post('/api/agent/run', {mode:'full_scan', city:'新北市'});
+    ph.querySelector('.bubble').textContent = r.report;
+    const d = document.createElement('div');
+    d.className = 'tools';
+    d.textContent = `工具呼叫 ${r.tool_calls} 次：`
+      + r.trace.map(t => `#${t.step} ${t.tool}`).join('  ');
+    ph.appendChild(d);
+    status(`Agent 掃描完成，工具呼叫 ${r.tool_calls} 次`);
+    await loadBoard(); await loadAlerts(); loadStats();
+  } catch (e) {
+    ph.querySelector('.bubble').textContent = '失敗：' + e.message;
+    status('Agent 掃描失敗');
+  } finally { lockButtons(false); }
+};
+
+$('#btnTrain').onclick = async () => {
+  lockButtons(true); status('以歷史裁罰為 label 訓練模型…', true);
+  try {
+    const r = await post('/api/train', {city:'新北市'});
+    status(r.trained
+      ? `訓練完成：樣本 ${r.samples}（正例 ${r.positive}）AUC ${r.train_auc}／正確率 ${r.train_accuracy}`
+      : `未訓練：${r.reason}`);
+    addMsg('風險評分工具', r.trained
+      ? `模型：${r.model}\n樣本 ${r.samples}（正例 ${r.positive}／負例 ${r.negative}）\n`
+        + `訓練集 AUC ${r.train_auc}、正確率 ${r.train_accuracy}\n`
+        + `係數：${JSON.stringify(r.coefficients, null, 1)}\n注意：${r.caveat}`
+      : r.reason, '');
+  } catch (e) { status('失敗：' + e.message); }
+  finally { lockButtons(false); }
+};
+
+loadStats(); loadBoard(); loadAlerts();
+</script>
+</body>
+</html>
